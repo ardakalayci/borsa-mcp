@@ -1,0 +1,39 @@
+# Docker Compose for deploying Borsa MCP Server (HTTP/streamable transport).
+#
+# Designed for Dokploy "Docker Compose" service type:
+#   - Build is taken from the repo Dockerfile (runs `uvicorn asgi_app:app`).
+#   - The MCP endpoint is served at  /mcp/  and health at  /health  on port 8000.
+#   - Do NOT publish a host port: Dokploy's Traefik reaches the container over
+#     its internal network. Configure the public domain + container port (8000)
+#     in the Dokploy UI (Domains tab). HTTPS is provisioned automatically.
+#   - Set BASE_URL / ALLOWED_ORIGINS / EVDS_API_KEY as Dokploy environment vars.
+#
+# Local test:  docker compose up --build   ->  http://localhost:8000/health
+services:
+  borsa-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      LOG_LEVEL: "info"
+      # Public https URL of the deployment (used in discovery endpoints).
+      BASE_URL: "${BASE_URL:-http://localhost:8000}"
+      # Comma-separated CORS origins; tighten in production.
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
+      # Optional: enables TCMB EVDS data fetch (catalog/search works without it).
+      EVDS_API_KEY: "${EVDS_API_KEY:-}"
+    # `expose` (not `ports`) keeps 8000 on the internal network for Traefik.
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # For local-only testing you can publish the port instead of `expose`:
+    # ports:
+    #   - "8000:8000"

@@ -39,6 +39,69 @@ PERIOD_MAPPING = {
 PERIOD_MAPPING_REVERSE = {v: k for k, v in PERIOD_MAPPING.items()}
 
 
+# =============================================================================
+# borsapy patch: optimistic financial-statement period generation
+# =============================================================================
+# borsapy's IsYatirimProvider._get_periods() uses a conservative month-band
+# heuristic that does NOT request the current calendar quarter until ~2 months
+# in. As a result, a freshly filed quarter (e.g. 2026Q1, available from İş
+# Yatırım in May) is never requested and the tool returns a stale latest quarter
+# (2025Q4). We replace it with an optimistic generator that probes from the
+# CURRENT calendar quarter going back. Unfiled quarters come back as all-None
+# from İş Yatırım and are dropped by borsapy's parser, so the result naturally
+# settles on the latest FILED quarter and self-heals over time.
+def _optimistic_get_periods(self, current_year, quarterly, count=5):
+    """Optimistic replacement for borsapy IsYatirimProvider._get_periods.
+
+    Starts at the CURRENT calendar quarter/year (probe it) and walks back. The
+    probed period is usually unfiled and comes back all-None (dropped by the
+    parser), so the result settles on the latest FILED period.
+
+    Slot count is rounded UP to a multiple of 4 because borsapy batches periods
+    in groups of 4 and the MaliTablo API rejects a partial trailing batch
+    (missing year4 -> NumberFormatException), silently dropping those periods.
+    Requesting full batches avoids that loss; BorsapyProvider trims the result
+    back to the requested count.
+    """
+    needed = count + 1  # +1 to absorb the (usually empty) current-period probe
+    n = ((needed + 3) // 4) * 4  # round up to a full batch of 4
+    if quarterly:
+        month = datetime.datetime.now().month
+        # current calendar quarter's period-month: 1-3->3, 4-6->6, 7-9->9, 10-12->12
+        period = ((month - 1) // 3 + 1) * 3
+        year = current_year
+        periods = []
+        for _ in range(n):
+            periods.append((year, period))
+            period -= 3
+            if period <= 0:
+                period = 12
+                year -= 1
+        return periods
+    # Annual: probe current year (early filers) plus prior years.
+    return [(current_year - i, 12) for i in range(n)]
+
+
+def _patch_borsapy_periods():
+    """Apply the optimistic period generator to borsapy's IsYatirimProvider.
+
+    Guarded so a borsapy upgrade that renames/removes the method cannot break
+    import; in that case we log and fall back to borsapy's own behavior.
+    """
+    try:
+        from borsapy._providers.isyatirim import IsYatirimProvider
+        if hasattr(IsYatirimProvider, "_get_periods"):
+            IsYatirimProvider._get_periods = _optimistic_get_periods
+            logger.info("Patched borsapy IsYatirimProvider._get_periods (optimistic periods)")
+        else:
+            logger.warning("borsapy IsYatirimProvider._get_periods missing; period patch skipped")
+    except Exception as e:
+        logger.warning(f"Could not patch borsapy period generation: {e}")
+
+
+_patch_borsapy_periods()
+
+
 class BorsapyProvider:
     """Provider for BIST stock data using borsapy library."""
 
@@ -288,6 +351,11 @@ class BorsapyProvider:
         }
         method_name = method_map[statement_type]
 
+        # Number of most-recent periods to keep. The patched period generator
+        # over-fetches (full batches + a current-period probe), so trim back to
+        # what was requested (borsapy's own default is 5).
+        desired = last_n if isinstance(last_n, int) and last_n > 0 else 5
+
         # Try XI_29 (industrial) first, then UFRS (banks)
         for group in [None, "UFRS"]:
             try:
@@ -297,7 +365,11 @@ class BorsapyProvider:
                     kwargs["financial_group"] = group
                 if last_n is not None:
                     kwargs["last_n"] = last_n
-                return method(**kwargs)
+                df = method(**kwargs)
+                # borsapy returns columns most-recent first; keep only `desired`.
+                if df is not None and hasattr(df, "shape") and df.shape[1] > desired:
+                    df = df.iloc[:, :desired]
+                return df
             except Exception:
                 if group == "UFRS":
                     raise  # Last attempt, let it propagate

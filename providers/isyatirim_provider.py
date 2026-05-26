@@ -213,7 +213,7 @@ class IsYatirimProvider:
             if raw_data.get("error"):
                 return {"error": raw_data["error"], "tablo": []}
 
-            return self._extract_balance_sheet(raw_data)
+            return self._drop_empty_periods(self._extract_balance_sheet(raw_data))
 
         except Exception as e:
             logger.error(f"Error fetching balance sheet for {ticker_kodu}: {e}")
@@ -237,7 +237,7 @@ class IsYatirimProvider:
             if raw_data.get("error"):
                 return {"error": raw_data["error"], "tablo": []}
 
-            return self._extract_income_statement(raw_data)
+            return self._drop_empty_periods(self._extract_income_statement(raw_data))
 
         except Exception as e:
             logger.error(f"Error fetching income statement for {ticker_kodu}: {e}")
@@ -261,7 +261,7 @@ class IsYatirimProvider:
             if raw_data.get("error"):
                 return {"error": raw_data["error"], "tablo": []}
 
-            return self._extract_cash_flow(raw_data)
+            return self._drop_empty_periods(self._extract_cash_flow(raw_data))
 
         except Exception as e:
             logger.error(f"Error fetching cash flow for {ticker_kodu}: {e}")
@@ -339,6 +339,28 @@ class IsYatirimProvider:
         # All groups failed
         return {"error": f"No financial data available for {ticker_kodu}", "items": []}
 
+    def _drop_empty_periods(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove period (date) columns that are empty across every row.
+
+        We optimistically probe the current period, which is usually unfiled and
+        comes back as None for all items. Dropping all-None columns keeps the
+        response clean and surfaces only periods that actually have data.
+        """
+        tablo = result.get("tablo") if isinstance(result, dict) else None
+        if not tablo:
+            return result
+
+        date_cols = [k for k in tablo[0].keys() if k != "Kalem"]
+        empty_cols = [
+            c for c in date_cols
+            if all(row.get(c) is None for row in tablo)
+        ]
+        if empty_cols:
+            for row in tablo:
+                for c in empty_cols:
+                    row.pop(c, None)
+        return result
+
     def _build_params(
         self,
         company_code: str,
@@ -361,17 +383,14 @@ class IsYatirimProvider:
         current_quarter = (current_month - 1) // 3 + 1  # 1-4
 
         if period_type == "quarterly":
-            # Use previous completed quarter (current quarter hasn't closed yet)
-            # If we're in Q4 2025 (Oct-Dec), most recent complete quarter is Q3 2025
+            # Optimistic: probe from the CURRENT quarter going back. A still-open
+            # or not-yet-filed quarter returns null from İş Yatırım; those empty
+            # period columns are dropped after extraction (_drop_empty_periods),
+            # so the result surfaces the latest FILED quarter and self-heals.
+            # (Mirrors borsapy_provider's optimistic period generation.)
             year = current_year
-            quarter = current_quarter - 1  # Previous quarter
+            quarter = current_quarter
 
-            if quarter == 0:
-                # If current quarter is Q1, previous is Q4 of last year
-                quarter = 4
-                year -= 1
-
-            # Get last 4 complete quarters starting from the previous one
             periods = []
             for i in range(4):
                 periods.append((year, quarter))
