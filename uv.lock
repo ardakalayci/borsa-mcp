@@ -122,8 +122,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.3" },
-    { name = "borsapy", specifier = ">=0.10.0" },
-    { name = "fastmcp", specifier = ">=2.14.0" },
+    { name = "borsapy", specifier = ">=0.10.0,<0.11.0" },
+    { name = "fastmcp", specifier = ">=2.14.0,<3.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "lxml", specifier = ">=5.2.0" },
     { name = "markitdown", specifier = ">=0.1.1" },
